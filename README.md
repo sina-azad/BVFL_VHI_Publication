@@ -1,0 +1,1 @@
+This repository contains code for the paper "Clinical Characteristics and Voice Handicap Index Assessment of Common Benign Vocal Fold Lesions: A Case-Control Study From a Referral Center", published in the Journal of Voice.
