@@ -1,0 +1,1559 @@
+---
+title: "BVFL VHI Analysis"
+author: "Sina Azadnajafabad, MD, MPH"
+date: "January 10, 2025"
+---
+
+## packages
+
+```{r}
+# load packages
+pacman::p_load(
+  rio,
+  tidyverse,
+  readxl,
+  summarytools,
+  gtsummary,
+  finalfit,
+  sjPlot,
+  cowplot,
+  ResourceSelection,
+  pROC,
+  plotROC
+)
+
+# set options for summarytools::dfSummary()
+st_options(dfSummary.graph.col = FALSE)
+
+```
+
+## import and transform data
+
+```{r}
+# import data
+bvfl_data <- read_xlsx("datasets/bvfl data_15.7.2024.xlsx", sheet = 1)
+
+glimpse(bvfl_data)
+
+
+# transform data
+bvfl_data <- bvfl_data |>
+  mutate(
+    group = factor(group, levels = c(0, 1), labels = c("Control", "Case")),
+    sex = factor(sex, levels = c(0, 1), labels = c("Female", "Male")),
+    job = factor(job, levels = c(0, 1), labels = c("Low risk", "High risk")),
+    allergy = factor(allergy, levels = c(0, 1)),
+    gerd = factor(gerd, levels = c(0, 1)),
+    anesthesia = factor(anesthesia, levels = c(0, 1)),
+    smoke = factor(smoke, levels = c(0, 1)),
+    alcohol = factor(alcohol, levels = c(0, 1)),
+    talkativeness = factor(
+      talkativeness,
+      levels = c(1, 2, 3),
+      labels = c("Mild", "Moderate", "Severe")
+    ),
+    voice_tone = factor(
+      voice_tone,
+      levels = c(1, 2, 3),
+      labels = c("Low", "Average", "High")
+    ),
+    voice_therapy = factor(voice_therapy, levels = c(0, 1)),
+    diagnosis = factor(
+      diagnosis,
+      levels = c(1, 2, 3, 4),
+      labels = c("Nodule", "Polyp", "Cyst", "Granuloma")
+    ),
+    cord_side = factor(
+      cord_side,
+      levels = c(1, 2, 3),
+      labels = c("Left", "Right", "Both")
+    )
+  ) |>
+  relocate(voice_therapy, .after = anesthesia)
+
+
+# calculate vhi scores with row-wise sums
+bvfl_data <- bvfl_data |>
+  rowwise() |>
+  mutate(
+    vhi_f_sum = sum(c_across(starts_with("vhi_f")), na.rm = T),
+    vhi_p_sum = sum(c_across(starts_with("vhi_p")), na.rm = T),
+    vhi_e_sum = sum(c_across(starts_with("vhi_e")), na.rm = T),
+
+    # calculate total sum of all vhi scores
+    vhi_total = vhi_f_sum + vhi_p_sum + vhi_e_sum
+  ) |>
+  ungroup()
+
+
+# add vhi_cat  for vhi mild (0-30), moderate (31-60), and severe (60-120) (ref: <http://www.b-ent.be/Content/files/sayilar/73/2007-3-2-061-Maertens.pdf>)
+bvfl_data <- bvfl_data |>
+  mutate(
+    vhi_cat = cut(
+      vhi_total,
+      breaks = c(0, 30, 60, 120),
+      labels = c("Mild", "Moderate", "Severe"),
+      include.lowest = TRUE,
+      right = TRUE
+    )
+  )
+
+
+# add age groups
+bvfl_data <- bvfl_data |>
+  mutate(
+    age_cat = cut(
+      age,
+      breaks = c(18, 30, 40, 50, 60, 100),
+      labels = c("18-29", "30-39", "40-49", "50-59", "\u226560"),
+      include.lowest = T,
+      right = F
+    )
+  ) |>
+  relocate(age_cat, .after = age)
+
+
+bvfl_data |>
+  select(age, age_cat) |>
+  print()
+
+
+# select variables
+bvfl_data <- bvfl_data |>
+  select(
+    id:cord_side,
+    vhi_f_sum:vhi_cat
+  )
+
+
+# save cleaned data
+saveRDS(bvfl_data, "datasets/bvfl_clean.Rds")
+
+```
+
+## descriptive analysis
+
+```{r}
+# import data
+df <- readRDS("datasets/bvfl_clean.Rds")
+
+glimpse(df)
+dfSummary(df)
+
+```
+
+### normality check
+
+```{r}
+# histograms
+hist(df$age, col = "steelblue")
+hist(df$duration, col = "steelblue")
+hist(df$vhi_f_sum, col = "steelblue")
+hist(df$vhi_p_sum, col = "steelblue")
+hist(df$vhi_e_sum, col = "steelblue")
+hist(df$vhi_total, col = "steelblue")
+
+
+# skewness & kurtosis
+df |>
+  select(age, duration, vhi_f_sum, vhi_p_sum, vhi_e_sum, vhi_total) |>
+  summarytools::descr()
+
+
+# Shapiro-Wilk test
+df |>
+  rstatix::shapiro_test(
+    age,
+    duration,
+    vhi_f_sum,
+    vhi_p_sum,
+    vhi_e_sum,
+    vhi_total
+  )
+
+```
+
+### table 1
+
+Patient characteristics by study groups
+
+```{r}
+# table 1
+table1 <- df |>
+  select(group:voice_tone) |>
+  tbl_summary(
+    by = group,
+
+    type = list(
+      all_continuous() ~ "continuous",
+      c(allergy, gerd, anesthesia, smoke, alcohol, voice_therapy) ~
+        "dichotomous"
+    ),
+
+    statistic = list(
+      all_categorical() ~ "{n} ({p}%)",
+      all_continuous() ~
+        c(
+          "{median} ({p25}, {p75})"
+        )
+    ),
+
+    digits = list(
+      all_continuous() ~ c(0, 1, 1),
+      all_categorical() ~ c(0, 1)
+    ),
+
+    value = list(
+      c(allergy, gerd, anesthesia, smoke, alcohol, voice_therapy) ~ "1"
+    ),
+
+    label = list(
+      age ~ "Age, y",
+      age_cat ~ "Age group",
+      sex ~ "Sex",
+      job ~ "Profession",
+      allergy ~ "Allergy history",
+      gerd ~ "LPR history",
+      anesthesia ~ "Anesthesia history",
+      smoke ~ "Current smoking",
+      alcohol ~ "Alcohol consumption",
+      talkativeness ~ "Talkativeness level",
+      voice_tone ~ "Voice loudness",
+      voice_therapy ~ "Voice therapy history"
+    ),
+
+    missing = "ifany",
+    missing_text = "missing",
+    percent = "column"
+  ) |>
+  add_p(pvalue_fun = ~ style_pvalue(.x, digits = 3)) |>
+  bold_p() |>
+  add_overall() |>
+  modify_header(label ~ "**Variable**") |>
+  modify_spanning_header(c("stat_1", "stat_2") ~ "**Study Group**") |>
+  modify_footnote(
+    all_stat_cols() ~ "Median (IQR) or Frequency (%)"
+  ) |>
+  bold_labels()
+
+table1
+
+
+# save table
+table1 |>
+  as_hux_xlsx("reports/table 1.xlsx")
+
+```
+
+### table 2
+
+Case group diagnostic details
+
+```{r}
+# table 2
+table2 <- df |>
+  filter(group == "Case") |>
+  select(diagnosis, cord_side, duration) |>
+
+  tbl_summary(
+    type = list(
+      c(diagnosis, cord_side) ~ "categorical",
+      duration ~ "continuous"
+    ),
+
+    statistic = list(
+      all_categorical() ~ "{n} ({p}%)",
+      all_continuous() ~
+        c(
+          "{median} ({p25}, {p75})"
+        )
+    ),
+
+    digits = list(
+      all_continuous() ~ c(0, 1, 1),
+      all_categorical() ~ c(0, 1)
+    ),
+
+    label = list(
+      diagnosis ~ "Diagnosis",
+      cord_side ~ "Vocal fold side",
+      duration ~ "Disease duration, m"
+    ),
+
+    sort = list(all_categorical() ~ "frequency"),
+
+    missing = "ifany",
+    missing_text = "missing",
+    percent = "column"
+  ) |>
+  modify_header(label ~ "**Variable**") |>
+  modify_header(stat_0 ~ "**Summary**") |>
+  modify_footnote(
+    all_stat_cols() ~ "Median (IQR) or Frequency (%)"
+  ) |>
+  bold_labels()
+
+
+table2
+
+
+# save table
+table2 |>
+  as_hux_xlsx("reports/table 2.xlsx")
+
+```
+
+### table 3
+
+VHI scores and categories by study groups
+
+```{r}
+# table 3
+table3 <- df |>
+  select(group, vhi_f_sum:vhi_cat) |>
+
+  tbl_summary(
+    by = group,
+
+    type = all_continuous() ~ "continuous",
+
+    statistic = list(
+      all_categorical() ~ "{n} ({p}%)",
+      all_continuous() ~
+        c(
+          "{median} ({p25}, {p75})"
+        )
+    ),
+
+    digits = list(
+      all_continuous() ~ c(0, 1, 1),
+      all_categorical() ~ c(0, 1)
+    ),
+
+    label = list(
+      vhi_f_sum ~ "VHI Functional Score",
+      vhi_p_sum ~ "VHI Physical Score",
+      vhi_e_sum ~ "VHI Emotional Score",
+      vhi_total ~ "Total VHI Score",
+      vhi_cat ~ "VHI Score Category"
+    ),
+
+    missing = "ifany",
+    missing_text = "missing",
+    percent = "column"
+  ) |>
+  add_p(pvalue_fun = ~ style_pvalue(.x, digits = 3)) |>
+  bold_p() |>
+  add_overall() |>
+  modify_header(label ~ "**Variable**") |>
+  modify_spanning_header(c("stat_1", "stat_2") ~ "**Study Group**") |>
+  modify_footnote(
+    all_stat_cols() ~ "Median (IQR) or Frequency (%)"
+  ) %>%
+  bold_labels()
+
+
+table3
+
+
+# save table
+table3 |>
+  as_hux_xlsx("reports/table 3.xlsx")
+
+```
+
+### table 4
+
+VHI scores based on lesion types in the case group
+
+```{r}
+# table 4
+table4 <- df |>
+  filter(group == "Case") |>
+  select(diagnosis, vhi_f_sum:vhi_cat) |>
+
+  tbl_summary(
+    by = diagnosis,
+
+    type = all_continuous() ~ "continuous",
+
+    statistic = list(
+      all_categorical() ~ "{n} ({p}%)",
+      all_continuous() ~
+        c(
+          "{median} ({p25}, {p75})"
+        )
+    ),
+
+    digits = list(
+      all_continuous() ~ c(0, 1, 1),
+      all_categorical() ~ c(0, 1)
+    ),
+
+    label = list(
+      vhi_f_sum ~ "VHI Functional Score",
+      vhi_p_sum ~ "VHI Physical Score",
+      vhi_e_sum ~ "VHI Emotional Score",
+      vhi_total ~ "Total VHI Score",
+      vhi_cat ~ "VHI Score Category"
+    ),
+
+    missing = "ifany",
+    missing_text = "missing",
+    percent = "column"
+  ) |>
+  add_p(pvalue_fun = ~ style_pvalue(.x, digits = 3)) |>
+  bold_p() |>
+  modify_header(label ~ "**Variable**") |>
+  modify_spanning_header(
+    c("stat_1", "stat_2", "stat_3", "stat_4") ~ "**Diagnosis**"
+  ) |>
+  modify_footnote(
+    all_stat_cols() ~ "Median (IQR) or Frequency (%)"
+  ) %>%
+  bold_labels()
+
+
+table4
+
+
+# save table
+table4 |>
+  as_hux_xlsx("reports/table 4.xlsx")
+
+```
+
+### table 5
+
+VHI scores based on talkativeness level, and stratified by study groups
+
+```{r}
+# table 5
+table5 <- df |>
+  select(group, talkativeness, vhi_f_sum:vhi_cat) |>
+  tbl_strata(
+    strata = group,
+    .tbl_fun = ~ .x |>
+      tbl_summary(
+        by = talkativeness,
+
+        type = list(
+          vhi_f_sum ~ "continuous",
+          vhi_p_sum ~ "continuous",
+          vhi_e_sum ~ "continuous",
+          vhi_total ~ "continuous",
+          vhi_cat ~ "categorical"
+        ),
+
+        statistic = list(
+          all_categorical() ~ "{n} ({p}%)",
+          all_continuous() ~
+            c(
+              "{median} ({p25}, {p75})"
+            )
+        ),
+
+        digits = list(
+          all_continuous() ~ c(0, 1, 1),
+          all_categorical() ~ c(0, 1)
+        ),
+
+        label = list(
+          vhi_f_sum ~ "VHI Functional Score",
+          vhi_p_sum ~ "VHI Physical Score",
+          vhi_e_sum ~ "VHI Emotional Score",
+          vhi_total ~ "Total VHI Score",
+          vhi_cat ~ "VHI Score Category"
+        ),
+
+        missing = "ifany",
+        missing_text = "missing",
+        percent = "column"
+      ) |>
+      add_p(pvalue_fun = ~ style_pvalue(.x, digits = 3)) |>
+      bold_p() |>
+      modify_header(label ~ "**Variable**") |>
+      modify_spanning_header(
+        c("stat_1", "stat_2", "stat_3") ~ "**Talkativeness level**"
+      ) |>
+      modify_footnote(
+        all_stat_cols() ~ "Median (IQR) or Frequency (%)"
+      ) |>
+      bold_labels(),
+    .header = "**{strata}**, N = {n}"
+  )
+
+table5
+
+
+# save table
+table5 |>
+  as_hux_xlsx("reports/table 5.xlsx")
+
+```
+
+### table 6
+
+VHI scores based on voice loudness, and stratified by study groups
+
+```{r}
+# table 6
+table6 <- df |>
+  select(group, voice_tone, vhi_f_sum:vhi_cat) |>
+  tbl_strata(
+    strata = group,
+    .tbl_fun = ~ .x |>
+      tbl_summary(
+        by = voice_tone,
+
+        type = list(
+          vhi_f_sum ~ "continuous",
+          vhi_p_sum ~ "continuous",
+          vhi_e_sum ~ "continuous",
+          vhi_total ~ "continuous",
+          vhi_cat ~ "categorical"
+        ),
+
+        statistic = list(
+          all_categorical() ~ "{n} ({p}%)",
+          all_continuous() ~
+            c(
+              "{median} ({p25}, {p75})"
+            )
+        ),
+
+        digits = list(
+          all_continuous() ~ c(0, 1, 1),
+          all_categorical() ~ c(0, 1)
+        ),
+
+        label = list(
+          vhi_f_sum ~ "VHI Functional Score",
+          vhi_p_sum ~ "VHI Physical Score",
+          vhi_e_sum ~ "VHI Emotional Score",
+          vhi_total ~ "Total VHI Score",
+          vhi_cat ~ "VHI Score Category"
+        ),
+
+        missing = "ifany",
+        missing_text = "missing",
+        percent = "column"
+      ) |>
+      add_p(pvalue_fun = ~ style_pvalue(.x, digits = 3)) |>
+      bold_p() |>
+      modify_header(label ~ "**Variable**") |>
+      modify_spanning_header(
+        c("stat_1", "stat_2", "stat_3") ~ "**Voice loudness level**"
+      ) |>
+      modify_footnote(
+        all_stat_cols() ~ "Median (IQR) or Frequency (%)"
+      ) |>
+      bold_labels(),
+    .header = "**{strata}**, N = {n}"
+  )
+
+table6
+
+
+# save table
+table6 |>
+  as_hux_xlsx("reports/table 6.xlsx")
+
+```
+
+### supplementary table 1
+
+Cord_side breakdown based on diagnosis in cases 
+
+```{r}
+# supp table 1
+supptable1 <- df |>
+  filter(group == "Case") |>
+  select(diagnosis, cord_side) |>
+
+  tbl_summary(
+    by = diagnosis,
+
+    type = all_continuous() ~ "continuous",
+
+    statistic = list(
+      all_categorical() ~ "{n} ({p}%)",
+      all_continuous() ~
+        c(
+          "{median} ({p25}, {p75})"
+        )
+    ),
+
+    digits = list(
+      all_continuous() ~ c(0, 1, 1),
+      all_categorical() ~ c(0, 1)
+    ),
+
+    label = list(
+      cord_side ~ "Vocal fold side"
+    ),
+
+    sort = list(everything() ~ "frequency"),
+
+    missing = "ifany",
+    missing_text = "missing",
+    percent = "column"
+  ) |>
+  add_p() |>
+  bold_p() |>
+  add_overall() |>
+  modify_header(label ~ "**Variable**") |>
+  modify_footnote(
+    all_stat_cols() ~ "Median (IQR) or Frequency (%)"
+  ) |>
+  bold_labels()
+
+
+supptable1
+
+
+# save table
+supptable1 |>
+  as_hux_xlsx("reports/supp table 1.xlsx")
+
+```
+
+## visualization
+
+### figure 1
+
+Series of boxplots for VHI scores in cases vs controls.
+
+1. boxplot for total vhi score
+
+```{r}
+# boxplot1
+boxplot1 <- ggplot(df, aes(x = group, y = vhi_total, fill = group)) +
+  stat_boxplot(geom = "errorbar", width = 0.4) +
+  geom_boxplot() +
+  scale_fill_viridis_d(option = "A", direction = -1) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.title.x = element_text(size = 17),
+    axis.title.y = element_text(size = 17),
+    axis.text.x = element_text(size = 14)
+  ) +
+  labs(x = NULL, y = "Total VHI Score") +
+  scale_x_discrete(labels = c("Control", "Case"))
+
+boxplot1
+
+```
+
+2. boxplot for vhi functional score
+
+```{r}
+# boxplot2
+boxplot2 <- ggplot(df, aes(x = group, y = vhi_f_sum, fill = group)) +
+  stat_boxplot(geom = "errorbar", width = 0.4) +
+  geom_boxplot() +
+  scale_fill_viridis_d(option = "A", direction = -1) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.title.x = element_text(size = 17),
+    axis.title.y = element_text(size = 17),
+    axis.text.x = element_text(size = 14)
+  ) +
+  labs(x = NULL, y = "VHI Functional Score") +
+  scale_x_discrete(labels = c("Control", "Case"))
+
+boxplot2
+
+```
+
+3. boxplot for vhi physical score
+
+```{r}
+# boxplot3
+boxplot3 <- ggplot(df, aes(x = group, y = vhi_p_sum, fill = group)) +
+  stat_boxplot(geom = "errorbar", width = 0.4) +
+  geom_boxplot() +
+  scale_fill_viridis_d(option = "A", direction = -1) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.title.x = element_text(size = 17),
+    axis.title.y = element_text(size = 17),
+    axis.text.x = element_text(size = 14)
+  ) +
+  labs(x = NULL, y = "VHI Physical Score") +
+  scale_x_discrete(labels = c("Control", "Case"))
+
+boxplot3
+
+```
+
+4. boxplot for vhi emotional score
+
+```{r}
+# boxplot4
+boxplot4 <- ggplot(df, aes(x = group, y = vhi_e_sum, fill = group)) +
+  stat_boxplot(geom = "errorbar", width = 0.4) +
+  geom_boxplot() +
+  scale_fill_viridis_d(option = "A", direction = -1) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.title.x = element_text(size = 17),
+    axis.title.y = element_text(size = 17),
+    axis.text.x = element_text(size = 14)
+  ) +
+  labs(x = NULL, y = "VHI Emotional Score") +
+  scale_x_discrete(labels = c("Control", "Case"))
+
+boxplot4
+
+```
+
+arrange boxplots:
+
+```{r}
+# make plot grid
+figure1 <- cowplot::plot_grid(
+  boxplot1,
+  boxplot2,
+  boxplot3,
+  boxplot4,
+  nrow = 1,
+  ncol = 4,
+  labels = "AUTO",
+  label_size = 15,
+  align = "h",
+  axis = "bt"
+)
+
+figure1
+
+# save plot
+ggsave(
+  "plots/figure 1.jpg",
+  plot = figure1,
+  dpi = 320,
+  units = "cm",
+  width = 30,
+  height = 15
+)
+
+```
+
+### figure 2
+
+Barplots for vhi categories across study groups and lesion types
+
+1. across study groups
+
+```{r}
+# calculate proportions
+df_vhi_prop <- df |>
+  group_by(group, vhi_cat) |>
+  summarise(count = n()) |>
+  mutate(percentage = count / sum(count) * 100)
+
+df_vhi_prop
+
+
+# barplot1
+barplot1 <- ggplot(
+  df_vhi_prop,
+  aes(x = group, y = percentage, fill = vhi_cat)
+) +
+  geom_bar(stat = "identity", position = "stack") +
+  geom_text(
+    aes(label = paste0(round(percentage, 1), "%")),
+    position = position_stack(vjust = 0.5),
+    size = 3.5
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Mild" = "aquamarine3",
+      "Moderate" = "goldenrod1",
+      "Severe" = "brown2"
+    )
+  ) +
+  labs(x = "Group", y = "Percentage", fill = "VHI category") +
+  theme_minimal() +
+  scale_x_discrete(labels = c("Control", "Case")) +
+  theme(
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    axis.text.x = element_text(size = 13)
+  )
+
+barplot1
+
+```
+
+2. across lesion types in cases
+
+```{r}
+# calculate proportions
+df_vhi_prop <- df |>
+  filter(group == "Case") |>
+  group_by(diagnosis, vhi_cat) |>
+  summarise(count = n()) |>
+  mutate(percentage = count / sum(count) * 100)
+
+df_vhi_prop
+
+
+# barplot2
+barplot2 <- ggplot(
+  df_vhi_prop,
+  aes(x = diagnosis, y = percentage, fill = vhi_cat)
+) +
+  geom_bar(stat = "identity", position = "stack") +
+  geom_text(
+    aes(label = paste0(round(percentage, 1), "%")),
+    position = position_stack(vjust = 0.5),
+    size = 3.5
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Mild" = "aquamarine3",
+      "Moderate" = "goldenrod1",
+      "Severe" = "brown2"
+    )
+  ) +
+  labs(x = "Diagnosis", y = "Percentage", fill = "VHI category") +
+  theme_minimal() +
+  scale_x_discrete(labels = c("Nodule", "Polyp", "Cyst", "Granuloma")) +
+  theme(
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    axis.text.x = element_text(size = 13)
+  )
+
+barplot2
+
+```
+
+arrange barplots:
+
+```{r}
+# make plot grid
+figure2 <- cowplot::plot_grid(
+  barplot1,
+  barplot2,
+  nrow = 1,
+  ncol = 2,
+  labels = "AUTO",
+  label_size = 15,
+  align = "h",
+  axis = "bt"
+)
+
+figure2
+
+
+# save plot
+ggsave(
+  "plots/figure 2.jpg",
+  plot = figure2,
+  dpi = 320,
+  units = "cm",
+  width = 30,
+  height = 15
+)
+
+```
+
+### figure 3
+
+Boxplot for total vhi score between lesion types in cases
+
+```{r}
+# plot it
+figure3 <- df |>
+
+  filter(group == "Case") |>
+
+  ggplot(aes(x = diagnosis, y = vhi_total, fill = diagnosis)) +
+  stat_boxplot(geom = "errorbar", width = 0.4) +
+  geom_boxplot() +
+  scale_fill_viridis_d(option = "A", direction = -1) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.title.x = element_text(size = 17),
+    axis.title.y = element_text(size = 17),
+    axis.text.x = element_text(size = 14)
+  ) +
+  labs(x = NULL, y = "Total VHI Score") +
+  scale_x_discrete(labels = c("Nodule", "Polyp", "Cyst", "Granuloma"))
+
+figure3
+
+# save plot
+ggsave(
+  "plots/figure3.jpg",
+  plot = figure3,
+  dpi = 320,
+  units = "cm",
+  width = 15,
+  height = 15
+)
+
+```
+
+## regression analysis
+
+We did univariable and multivariable binary logistic regression, with "group" as dependent variable and several other variables as indepenedent variables (predictors). First, univariable models were run and those with p-value < 0.1 were introduced to the multivariable model.
+
+### regression models - table 7
+
+```{r}
+# select variables for model
+df1 <- df |>
+  select(group, age, sex:voice_tone) |>
+  mutate(
+    group = case_when(
+      group == "Control" ~ 0,
+      group == "Case" ~ 1
+    )
+  ) |>
+  mutate(group = factor(group))
+
+
+# fit a full multivariable binary logistic regression model
+model1 <- glm(group ~ ., data = df1, family = "binomial")
+
+summary(model1)
+
+# OR and 95% CI
+round(exp(cbind(OR = coef(model1), confint(model1))), 2)
+
+
+# fit a reduced multi glm model
+model2 <- glm(
+  group ~ job + gerd + smoke + talkativeness + voice_tone,
+  data = df1,
+  family = "binomial"
+)
+
+summary(model2)
+
+# OR and 95% CI
+round(exp(cbind(OR = coef(model2), confint(model2))), 2)
+
+
+# make the regression table, univaraible models + model 1 (full)
+model1_table <- finalfit.glm(
+  .data = df1,
+  dependent = "group",
+  explanatory = c(
+    "age",
+    "sex",
+    "job",
+    "allergy",
+    "gerd",
+    "anesthesia",
+    "voice_therapy",
+    "smoke",
+    "alcohol",
+    "talkativeness",
+    "voice_tone"
+  ),
+  metrics = F
+)
+
+model1_table
+
+# save reg table
+export(model1_table, file = "reports/table 7a.xlsx")
+
+
+# make the regression table, univaraible models + model 2 (reduced, p < 0.1)
+model2_table <- finalfit.glm(
+  .data = df1,
+  dependent = "group",
+  explanatory = c(
+    "age",
+    "sex",
+    "job",
+    "allergy",
+    "gerd",
+    "anesthesia",
+    "voice_therapy",
+    "smoke",
+    "alcohol",
+    "talkativeness",
+    "voice_tone"
+  ),
+  explanatory_multi = c("job", "gerd", "smoke", "talkativeness", "voice_tone"),
+  metrics = F
+)
+
+model2_table
+
+# save reg table
+export(model2_table, file = "reports/table 7b.xlsx")
+
+```
+
+### regression forest plots - figure 4
+
+1. forest plot of model 1 (full)
+
+```{r}
+# fit a full glm model
+model1 <- glm(group ~ ., data = df1, family = "binomial")
+
+
+# plot model with sjPlot::plot_model()
+forest_plot1 <- plot_model(
+  model1,
+  type = "est",
+  vline.color = "black",
+  sort.est = F,
+  show.values = T,
+  value.offset = 0.42,
+  show.p = T,
+  colors = c("navyblue", "red3"),
+  title = "BVFL diagnosis: positive",
+  auto.label = T,
+  axis.labels = rev(c(
+    "Age",
+    "Sex",
+    "Proefssion [High risk]",
+    "Allergy history",
+    "LPR history",
+    "Anesthesia history",
+    "Voice therapy history",
+    "Current smoking",
+    "Alcohol consumption",
+    "Talkativeness level [Moderate]",
+    "Talkativeness level [Severe]",
+    "Voice loudness [Average]",
+    "Voice loudness [High]"
+  ))
+) +
+  theme_sjplot2()
+
+forest_plot1
+
+# save plot
+ggsave("plots/forest_plot1.jpg", plot = forest_plot1, dpi = 320)
+
+```
+
+2. forest plot of model 2 (reduced)
+
+```{r}
+# fit a reduced multi glm model
+model2 <- glm(
+  group ~ job + gerd + smoke + talkativeness + voice_tone,
+  data = df1,
+  family = "binomial"
+)
+
+
+# plot model with sjPlot::plot_model()
+forest_plot2 <- plot_model(
+  model2,
+  type = "est",
+  vline.color = "black",
+  sort.est = F,
+  show.values = T,
+  value.offset = 0.3,
+  show.p = T,
+  colors = c("red3"),
+  title = "BVFL diagnosis: positive",
+  auto.label = T,
+  axis.labels = rev(c(
+    "Proefssion [High risk]",
+    "LPR history",
+    "Current smoking",
+    "Talkativeness level [Moderate]",
+    "Talkativeness level [Severe]",
+    "Voice loudness [Average]",
+    "Voice loudness [High]"
+  ))
+) +
+  theme_sjplot2()
+
+forest_plot2
+
+# save plot
+ggsave("plots/forest_plot2.jpg", plot = forest_plot2, dpi = 320)
+
+```
+
+arrange regression models forest plots
+
+```{r}
+# make plot grid
+figure4 <- cowplot::plot_grid(
+  forest_plot1,
+  forest_plot2,
+  nrow = 1,
+  ncol = 2,
+  labels = "AUTO",
+  label_size = 15,
+  align = "h",
+  axis = "bt"
+)
+
+figure4
+
+# save plot
+ggsave(
+  "plots/figure 4.jpg",
+  plot = figure4,
+  dpi = 320,
+  units = "cm",
+  width = 30,
+  height = 15
+)
+
+```
+
+### regression model diagnostics
+
+We evaluated the regression models using Hosmer-Lemeshow Test to determine the goodness of fit of model (where small values with large p-values indicate a good fit to the data while large values with p-values below 0.05 indicate a poor fit: <https://www.r-bloggers.com/2015/08/evaluating-logistic-regression-models/>), and also by calculating AUC and ROC curve (where in the plot, the closer the ROC curve is to the upper left-hand corner, the better the model, and the closer the AUC is to 1, the better the model).
+
+```{r}
+# transform group to numeric where 1 = "1"
+df1 <- df1 |>
+  mutate(group_num = as.integer(group == "1"))
+
+
+# fit model 1
+model1 <- glm(group_num ~ ., data = df1, family = "binomial")
+
+# Hosmer-Lemeshow Test to determine the goodness of fit of model
+ResourceSelection::hoslem.test(
+  x = model1$y,
+  y = predict(model1, type = "response"),
+  g = 10
+)
+
+
+# fit model 2
+model2 <- glm(
+  group_num ~ job + gerd + smoke + talkativeness + voice_tone,
+  data = df1,
+  family = "binomial"
+)
+
+# Hosmer-Lemeshow Test to determine the goodness of fit of model
+ResourceSelection::hoslem.test(
+  x = model2$y,
+  y = predict(model2, type = "response"),
+  g = 10
+)
+
+
+# model 1 roc
+# save roc object
+roc_obj <- roc(group ~ fitted(model1), data = df1)
+
+# plot ROC curve
+ggroc(roc_obj, legacy.axes = TRUE)
+
+# Calculate AUC + 95% CI
+auc(roc_obj)
+ci.auc(roc_obj)
+
+
+# model 2 roc
+# save roc object
+roc_obj <- roc(group ~ fitted(model2), data = df1)
+
+# plot ROC curve
+ggroc(roc_obj, legacy.axes = TRUE)
+
+# Calculate AUC + 95% CI
+auc(roc_obj)
+ci.auc(roc_obj)
+
+```
+
+### compare regression models
+
+Here we compare the full and reduced regression models using the Likelihood Ratio Test.
+
+```{r}
+# fit models
+model1 <- glm(group ~ ., data = df1, family = "binomial")
+
+model2 <- glm(
+  group ~ job + gerd + smoke + talkativeness + voice_tone,
+  data = df1,
+  family = "binomial"
+)
+
+# compare models with Likelihood Ratio Test
+anova(model2, model1, test = "LRT")
+
+
+# compare models with R2 & AIC (lower AIC is better)
+sjPlot::tab_model(
+  model1,
+  model2,
+  show.ci = F,
+  show.aic = T,
+  p.style = "numeric_stars"
+)
+
+```
+
+## ROC Curve analysis
+
+### roc 1
+
+First we calculate the best cut-off point for vhi total score to differentiate the cases from controls.
+
+```{r}
+# slice data
+df_roc <- df |>
+  select(group, vhi_total)
+
+# create the roc object
+roc_obj <- roc(response = df_roc$group, predictor = df_roc$vhi_total)
+
+roc_obj
+
+
+# plot the ROC curve [aes: [d = disease status] & [m = marker]]
+rocplot1 <- ggplot(df, aes(d = as.numeric(group), m = vhi_total)) +
+  geom_roc(n.cuts = 0, color = "#0071BF") +
+  theme_minimal() +
+  theme(text = element_text(size = 14)) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+  scale_x_continuous(expand = c(0, 0.015)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  labs(x = "1 - Specificity", y = "Sensitivity")
+
+rocplot1
+
+
+# find the optimal cutoff point
+optimal_coords <- coords(roc_obj, "best", ret = "all", best.method = "youden")
+
+optimal_coords
+
+
+# extract the optimal threshold
+optimal_coords$threshold
+
+
+# calculate AUC + 95% CI
+auc(roc_obj)
+ci.auc(roc_obj)
+
+
+# sensitivity and specificity at cutoff = 17.5
+coords_opt1 <- coords(roc_obj, 17.5, ret = c("specificity", "sensitivity"))
+
+coords_opt1
+
+
+# calculate CIs for sensitivity and specificity at cutoff = 17.5
+ci.thresholds(roc_obj, thresholds = 17.5, conf.level = 0.95)
+
+
+# plot ROC curve with the optimal point
+rocplot1 <- rocplot1 +
+  geom_point(
+    aes(x = 1 - coords_opt1$specificity, y = coords_opt1$sensitivity),
+    color = "brown4",
+    size = 3
+  ) +
+  geom_text(
+    aes(
+      x = 1 - coords_opt1$specificity,
+      y = coords_opt1$sensitivity,
+      label = "17.5"
+    ),
+    vjust = 2,
+    hjust = 0,
+    color = "brown4"
+  )
+
+rocplot1
+
+
+# add annotations to the plot
+rocplot1 <- rocplot1 +
+  annotate(
+    "text",
+    x = 0.70,
+    y = 0.30,
+    size = 4,
+    label = paste("AUC = ", 0.990, "(95% CI = ", 0.977, "-", 1, ")")
+  )
+
+rocplot1
+
+
+# calculate the maximum value of Youden index by [sens + spec - 1]
+optimal_coords$sensitivity + optimal_coords$specificity - 1
+
+```
+
+Next, we compare the fitted roc curve for the previous cut-off = 14.5 from a similar paper (<https://pubmed.ncbi.nlm.nih.gov/23182896/>).
+
+```{r}
+# comparing to a previously known cut-off (14.5)
+previous_cutoff <- 14.5
+
+
+# sensitivity and Specificity at previous cutoff
+coords(roc_obj, 14.5, ret = "all")
+
+```
+
+### roc 2
+
+roc curve analysis to distinguish between lesions:
+
+our preliminary exploration of data showed differences between the vhi scores as nodules having a high score with a noticeable difference from other three lesions.
+
+```{r}
+# add diagnosis_2 variable grouping nodule into 1 and other three lesions into 0
+df1 <- df |>
+  filter(group == "Case") |>
+  mutate(
+    diagnosis_2 = case_when(
+      diagnosis == "Nodule" ~ 1,
+      diagnosis == "Polyp" ~ 0,
+      diagnosis == "Cyst" ~ 0,
+      diagnosis == "Granuloma" ~ 0
+    )
+  ) |>
+  mutate(diagnosis_2 = factor(diagnosis_2, levels = c(0, 1)))
+
+
+# slice data
+df_roc <- df1 |>
+  select(diagnosis_2, vhi_total)
+
+
+# create the roc object
+roc_obj <- roc(response = df_roc$diagnosis_2, predictor = df_roc$vhi_total)
+
+roc_obj
+
+
+# plot the ROC curve [aes: [d = disease status] & [m = marker]]
+rocplot2 <- ggplot(df1, aes(d = as.numeric(diagnosis_2), m = vhi_total)) +
+  geom_roc(n.cuts = 0, color = "#0071BF") +
+  theme_minimal() +
+  theme(text = element_text(size = 14)) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+  scale_x_continuous(expand = c(0, 0.015)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  labs(x = "1 - Specificity", y = "Sensitivity")
+
+rocplot2
+
+
+# find the optimal cutoff point
+optimal_coords <- coords(roc_obj, "best", ret = "all", best.method = "youden")
+
+optimal_coords
+
+
+# extract the optimal threshold
+optimal_coords$threshold
+
+
+# calculate AUC + 95% CI
+auc(roc_obj)
+ci.auc(roc_obj)
+
+
+# sensitivity and specificity at cutoff = 48.5
+coords_opt2 <- coords(roc_obj, 48.5, ret = c("specificity", "sensitivity"))
+
+coords_opt2
+
+
+# calculate CIs for sensitivity and specificity at cutoff = 48.5
+ci.thresholds(roc_obj, thresholds = 48.5, conf.level = 0.95)
+
+
+# plot ROC curve with the optimal point
+rocplot2 <- rocplot2 +
+  geom_point(
+    aes(x = 1 - coords_opt2$specificity, y = coords_opt2$sensitivity),
+    color = "brown4",
+    size = 3
+  ) +
+  geom_text(
+    aes(
+      x = 1 - coords_opt2$specificity,
+      y = coords_opt2$sensitivity,
+      label = "48.5"
+    ),
+    vjust = -1,
+    hjust = 0.5,
+    color = "brown4"
+  )
+
+
+rocplot2
+
+# add annotations to the plot
+rocplot2 <- rocplot2 +
+  annotate(
+    "text",
+    x = 0.70,
+    y = 0.30,
+    size = 4,
+    label = paste("AUC = ", 0.668, "(95% CI = ", 0.507, "-", 0.829, ")")
+  )
+
+rocplot2
+
+# calculate the maximum value of Youden index by [sens + spec - 1]
+optimal_coords$sensitivity + optimal_coords$specificity - 1
+
+```
+
+### roc 3
+
+roc curve analysis to distinguish between lesions:
+
+our preliminary exploration of data showed differences between the vhi scores as granulomas having a low score with a noticeable difference from other three lesions.
+
+```{r}
+# add diagnosis_3 variable grouping granuloma into 0 and other three lesions into 1
+df1 <- df |>
+  filter(group == "Case") |>
+  mutate(
+    diagnosis_3 = case_when(
+      diagnosis == "Nodule" ~ 1,
+      diagnosis == "Polyp" ~ 1,
+      diagnosis == "Cyst" ~ 1,
+      diagnosis == "Granuloma" ~ 0
+    )
+  ) |>
+  mutate(diagnosis_3 = factor(diagnosis_3, levels = c(0, 1)))
+
+
+# slice data
+df_roc <- df1 |>
+  select(diagnosis_3, vhi_total)
+
+
+# create the roc object
+roc_obj <- roc(response = df_roc$diagnosis_3, predictor = df_roc$vhi_total)
+
+roc_obj
+
+
+# plot the ROC curve [aes: [d = disease status] & [m = marker]]
+rocplot3 <- ggplot(df1, aes(d = as.numeric(diagnosis_3), m = vhi_total)) +
+  geom_roc(n.cuts = 0, color = "#0071BF") +
+  theme_minimal() +
+  theme(text = element_text(size = 14)) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+  scale_x_continuous(expand = c(0, 0.015)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  labs(x = "1 - Specificity", y = "Sensitivity")
+
+rocplot3
+
+
+# find the optimal cutoff point
+optimal_coords <- coords(roc_obj, "best", ret = "all", best.method = "youden")
+
+optimal_coords
+
+
+# extract the optimal threshold
+optimal_coords$threshold
+
+
+# calculate AUC + 95% CI
+auc(roc_obj)
+ci.auc(roc_obj)
+
+
+# Get sensitivity and specificity at the cutoff point 32
+coords_opt3 <- coords(roc_obj, 32, ret = c("specificity", "sensitivity"))
+
+coords_opt3
+
+
+# sensitivity and specificity at cutoff = 32
+ci.thresholds(roc_obj, thresholds = 32, conf.level = 0.95)
+
+
+# plot ROC curve with the optimal point
+rocplot3 <- rocplot3 +
+  geom_point(
+    aes(x = 1 - coords_opt3$specificity, y = coords_opt3$sensitivity),
+    color = "brown4",
+    size = 3
+  ) +
+  geom_text(
+    aes(
+      x = 1 - coords_opt3$specificity,
+      y = coords_opt3$sensitivity,
+      label = "32.0"
+    ),
+    vjust = -1,
+    hjust = 0.25,
+    color = "brown4"
+  )
+
+rocplot3
+
+# add annotations to the plot
+rocplot3 <- rocplot3 +
+  annotate(
+    "text",
+    x = 0.70,
+    y = 0.30,
+    size = 4,
+    label = paste("AUC = ", 0.898, "(95% CI = ", 0.811, "-", 0.984, ")")
+  )
+
+rocplot3
+
+
+# calculate the maximum value of Youden index by [sens + spec - 1]
+optimal_coords$sensitivity + optimal_coords$specificity - 1
+
+```
+
+### figure 5
+
+arrange roc curve plots
+
+```{r}
+# make plot grid
+figure5 <- cowplot::plot_grid(
+  rocplot1,
+  rocplot2,
+  rocplot3,
+  nrow = 1,
+  ncol = 3,
+  labels = "AUTO",
+  label_size = 15
+)
+
+figure5
+
+
+# save plot
+ggsave(
+  "plots/figure 5.jpg",
+  plot = figure5,
+  dpi = 320,
+  units = "cm",
+  width = 45,
+  height = 15
+)
+
+```
+
